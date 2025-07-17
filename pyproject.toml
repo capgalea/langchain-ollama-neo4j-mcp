@@ -1,0 +1,19 @@
+[project]
+name = "langchain-ollama-neo4j-mcp"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi[standard]>=0.116.1",
+    "langchain-community>=0.3.27",
+    "langchain-mcp-adapters>=0.1.9",
+    "langchain-ollama>=0.3.5",
+    "langchain[opanai]>=0.3.26",
+    "langgraph>=0.5.3",
+    "neo4j>=5.28.1",
+    "nest-asyncio>=1.6.0",
+    "python-dotenv>=1.1.1",
+    "pyvis>=0.3.2",
+    "streamlit>=1.47.0",
+]
