@@ -5,8 +5,8 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.prebuilt import create_react_agent
 from langchain_community.callbacks import get_openai_callback
 from langchain_core.tracers import ConsoleCallbackHandler
-# from langchain.callbacks import get_openai_callback
 import asyncio
+import time
 import os
 
 from dotenv import load_dotenv
@@ -97,57 +97,50 @@ class MultiToolAgent:
         self.agent = create_react_agent(get_model(self.model), self.tools)
         return self
 
-    async def run_request(self, request: str) -> dict:
-        """Execute a request using the agent"""
+    async def run_request(self, request: str, with_logging: bool = False) -> dict:
+        """Internal method to process a request with optional logging"""
         if not self.agent:
             await self.initialize()
+
+        start_time = time.time()
         
-        # Get the response without logging
-        agent_response = await self.agent.ainvoke({"messages": request})
-        interpreted = await interpret_agent_response(agent_response, request, self.model)
-        return {"raw": agent_response, "answer": interpreted}
-    
-    async def run_request_with_logging(self, request: str) -> dict:
-        """Execute a request with detailed logging of the agent's reasoning"""
-        if not self.agent:
-            await self.initialize()
-    
-        
-        # Print the initial request
-        print(f"\n{'='*50}\nProcessing request: {request}\n{'='*50}")
-        
-        # Create a console callback for detailed logging
-        callbacks = [ConsoleCallbackHandler()]
-        
-        # Add token counting if using OpenAI
-        if 'gpt' in self.model.lower():
-            with get_openai_callback() as cb:
+        if with_logging:
+            print(f"\n{'='*50}\nProcessing request: {request}\n{'='*50}")
+            callbacks = [ConsoleCallbackHandler()]
+            
+            if 'gpt' in self.model.lower():
+                with get_openai_callback() as cb:
+                    agent_response = await self.agent.ainvoke(
+                        {"messages": request},
+                        {"callbacks": callbacks}
+                    )
+                    print(f"\nToken usage: {cb}")
+            else:
                 agent_response = await self.agent.ainvoke(
                     {"messages": request},
                     {"callbacks": callbacks}
                 )
-                print(f"\nToken usage: {cb}")
+            
+            print(f"\n{'='*50}\nRaw response:\n{agent_response}\n{'='*50}")
+            interpreted = await interpret_agent_response(agent_response, request, self.model)
+            print(f"\n{'='*50}\nFinal answer:\n{interpreted}\n{'='*50}")
         else:
-            # For non-OpenAI models
-            agent_response = await self.agent.ainvoke(
-                {"messages": request},
-                {"callbacks": callbacks}
-            )
+            agent_response = await self.agent.ainvoke({"messages": request})
+            interpreted = await interpret_agent_response(agent_response, request, self.model)
         
-        # Log the raw response
-        print(f"\n{'='*50}\nRaw response:\n{agent_response}\n{'='*50}")
-        
-        # Get the interpreted response
-        interpreted = await interpret_agent_response(agent_response, request, self.model)
-        
-        # Log the final answer
-        print(f"\n{'='*50}\nFinal answer:\n{interpreted}\n{'='*50}")
-        
-        return {"raw": agent_response, "answer": interpreted}
+        return {
+            "raw": agent_response,
+            "answer": interpreted,
+            "seconds_to_complete": round(time.time() - start_time, 2)  # Rounded to 2 decimal places
+        }
+
 
 # Run the async function
 if __name__ == "__main__":
+
+    # Edit the model name here - run `ollama list` to see available models
     model = "llama3.1"
+    
     # Write request
     # request = "Create a new node with the label 'Person' and the property 'name' set to 'John Doe'."
     

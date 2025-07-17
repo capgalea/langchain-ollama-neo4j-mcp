@@ -60,6 +60,8 @@ async def run_agent(request:str, model: str)->dict:
 
 # Run the async function
 if __name__ == "__main__":
+
+    # Edit the model name here - run `ollama list` to see available models
     model = "llama3.1"
 
     # Write example

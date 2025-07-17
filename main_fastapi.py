@@ -2,8 +2,12 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from main_multi import MultiToolAgent, MCP_SERVER_CONFIGS
 from dotenv import load_dotenv
-from functools import lru_cache
+import logging
 import os
+
+
+# Get the fastapi logger
+logger = logging.getLogger("fastapi")
 
 # Load environment variables
 load_dotenv()
@@ -60,9 +64,19 @@ async def query_agent(
     try:
         # Get or create agent from cache
         agent = get_agent(model)
-        result = await agent.run_request(command)
-        return {"status": "success", "result": result["answer"], "raw": result["raw"]}
+        result = await agent.run_request(command, with_logging=False)  # Enable logging for API requests
+        
+        # Ensure all values are JSON serializable
+        response = {
+            "status": "success", 
+            "result": str(result.get("answer", "")),  # Convert to string to ensure serialization
+            "raw": str(result.get("raw", "")),        # Convert raw to string
+            "seconds_to_complete": float(result.get("seconds_to_complete", 0.0))     # Explicitly convert to float
+        }
+        print(f"API Response: {response}")
+        return response
     except Exception as e:
+        print(f"Error in query_agent: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # Cache for agents by model name

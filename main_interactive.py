@@ -11,7 +11,7 @@ async def interactive_agent(agent: any):
             break
         try:
             # Use the version with detailed logging
-            agent_response = await agent.run_request_with_logging(user_input)
+            agent_response = await agent.run_request(user_input)
             # Just print the answer part in the interactive session
             print(f"\n🤖 Agent: {agent_response.get('answer', 'No answer provided')}\n")
         except Exception as e:
@@ -19,6 +19,8 @@ async def interactive_agent(agent: any):
 
 # Run the async function
 if __name__ == "__main__":
+
+    # Edit the model name here - run `ollama list` to see available models
     model = "llama3.1"
 
     async def main():

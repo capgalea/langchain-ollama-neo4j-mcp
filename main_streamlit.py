@@ -15,7 +15,7 @@ import tempfile
 
 
 # Update options from `ollama list` here
-MODEL_OPTIONS = ["llama3.1", "mistral", "qwen3","text2cypher"]
+MODEL_OPTIONS = ["llama3.2", "mistral", "qwen3"]
 
 def get_neo4j_graph():
     uri = os.environ.get("NEO4J_URI")
@@ -101,7 +101,7 @@ def main():
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
     if "last_model" not in st.session_state:
-        st.session_state.last_model = "llama3.1"
+        st.session_state.last_model = MODEL_OPTIONS[0]
 
     col1, col2 = st.columns([1, 1])
 
