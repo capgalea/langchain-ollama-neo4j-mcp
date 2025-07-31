@@ -687,7 +687,6 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "fastapi", extra = ["standard"] },
-    { name = "langchain" },
     { name = "langchain-community" },
     { name = "langchain-mcp-adapters" },
     { name = "langchain-ollama" },
@@ -702,7 +701,6 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", extras = ["standard"], specifier = ">=0.116.1" },
-    { name = "langchain", extras = ["opanai"], specifier = ">=0.3.26" },
     { name = "langchain-community", specifier = ">=0.3.27" },
     { name = "langchain-mcp-adapters", specifier = ">=0.1.9" },
     { name = "langchain-ollama", specifier = ">=0.3.5" },

@@ -9,7 +9,6 @@ dependencies = [
     "langchain-community>=0.3.27",
     "langchain-mcp-adapters>=0.1.9",
     "langchain-ollama>=0.3.5",
-    "langchain[opanai]>=0.3.26",
     "langgraph>=0.5.3",
     "neo4j>=5.28.1",
     "nest-asyncio>=1.6.0",
