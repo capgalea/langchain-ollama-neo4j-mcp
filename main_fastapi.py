@@ -79,6 +79,29 @@ async def query_agent(
         print(f"Error in query_agent: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/schema")
+async def get_schema():
+    """
+    Get the Neo4j database schema.
+    
+    Returns:
+        list: The schema information from the database
+    """
+    try:
+        # Use a default agent to fetch schema
+        agent = get_agent("qwen2.5:1.5b")  # Use lightweight model for schema fetch
+        if not agent.agent:
+            await agent.initialize()
+        
+        # Return cached schema if available
+        if hasattr(agent, 'schema_data') and agent.schema_data:
+            return agent.schema_data
+        
+        return []
+    except Exception as e:
+        print(f"Error in get_schema: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Cache for agents by model name
 _agent_cache = {}
 
