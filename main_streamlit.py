@@ -143,6 +143,47 @@ def main():
             st.session_state.chat_history = []
             st.session_state.last_model = selected_model
 
+        # Database Schema Display
+        with st.expander("📊 Database Schema", expanded=False):
+            if "schema_data" not in st.session_state:
+                try:
+                    # Fetch schema from FastAPI backend
+                    api_url = get_api_url()
+                    response = requests.get(f"{api_url}/schema", timeout=30)
+                    if response.status_code == 200:
+                        schema_data = response.json()
+                        # Handle if schema is returned as string
+                        if isinstance(schema_data, str):
+                            import json
+                            schema_data = json.loads(schema_data)
+                        st.session_state.schema_data = schema_data
+                    else:
+                        st.session_state.schema_data = None
+                except Exception as e:
+                    st.warning(f"Could not fetch schema: {e}")
+                    st.session_state.schema_data = None
+            
+            if st.session_state.schema_data and isinstance(st.session_state.schema_data, list):
+                for node_info in st.session_state.schema_data:
+                    label = node_info.get('label', 'Unknown')
+                    st.markdown(f"**Node: {label}**")
+                    
+                    attrs = node_info.get('attributes', {})
+                    if attrs:
+                        st.markdown("*Properties:*")
+                        for k, v in attrs.items():
+                            st.markdown(f"  - `{k}` ({v})")
+                    
+                    rels = node_info.get('relationships', {})
+                    if rels:
+                        st.markdown("*Relationships:*")
+                        for k, v in rels.items():
+                            st.markdown(f"  - `{k}` → {v}")
+                    
+                    st.markdown("---")
+            else:
+                st.info("Schema information not available")
+
         # Chat input
         user_input = st.chat_input("Type your message and press Enter...")
 
