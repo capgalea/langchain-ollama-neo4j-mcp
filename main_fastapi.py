@@ -44,7 +44,7 @@ app.add_middleware(
 async def query_agent(
     command: str = Query(..., 
         description="Simple instruction for the graph database agent", 
-        example="Create a new node with the label 'Person' and the property 'name' set to 'John Doe'."
+        example="Find all grants associated with the researcher 'raymond norton'."
     ), model: str = Query(..., 
         description="The name of the Ollama model to use. NOTE: Model must be available on the ollama server.", 
         example="llama3.1"
