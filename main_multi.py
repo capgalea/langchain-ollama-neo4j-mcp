@@ -142,7 +142,28 @@ class MultiToolAgent:
             for tool in all_tools:
                 print(f"- {tool.name}: {tool.description}")
             
+            # Fetch schema to provide context to the agent
+            schema_context = ""
+            schema_data = None
+            try:
+                schema_tool = None
+                for tool in all_tools:
+                    if 'schema' in tool.name.lower():
+                        schema_tool = tool
+                        break
+                
+                if schema_tool:
+                    print("\nFetching database schema...")
+                    schema_data = await schema_tool.ainvoke({})
+                    # Format schema for LLM context
+                    schema_context = self._format_schema_context(schema_data)
+                    print("✓ Schema loaded")
+            except Exception as e:
+                print(f"Warning: Could not fetch schema: {e}")
+            
             self.tools = all_tools
+            self.schema_data = schema_data  # Store raw schema data
+            self.schema_context = schema_context
             self.agent = create_react_agent(get_model(self.model), self.tools)
             return self
         except Exception as e:
@@ -170,10 +191,35 @@ class MultiToolAgent:
         self._sessions = []
         self._clients = []
 
+    def _format_schema_context(self, schema_data):
+        """Format schema data for LLM context"""
+        if not schema_data:
+            return ""
+        
+        context = "\n\nDATABASE SCHEMA:\n"
+        for node_info in schema_data:
+            label = node_info.get('label', 'Unknown')
+            context += f"\nNode: {label}\n"
+            
+            attrs = node_info.get('attributes', {})
+            if attrs:
+                context += "  Properties: " + ", ".join(f"{k} ({v})" for k, v in attrs.items()) + "\n"
+            
+            rels = node_info.get('relationships', {})
+            if rels:
+                context += "  Relationships: " + ", ".join(f"{k} -> {v}" for k, v in rels.items()) + "\n"
+        
+        return context
+
     async def run_request(self, request: str, with_logging: bool = False) -> dict:
         """Internal method to process a request with optional logging"""
         if not self.agent:
             await self.initialize()
+
+        # Inject schema context into request
+        full_request = request
+        if hasattr(self, 'schema_context') and self.schema_context:
+            full_request = self.schema_context + "\n\nUSER REQUEST: " + request
 
         start_time = time.time()
         
@@ -184,13 +230,13 @@ class MultiToolAgent:
             if 'gpt' in self.model.lower():
                 with get_openai_callback() as cb:
                     agent_response = await self.agent.ainvoke(
-                        {"messages": request},
+                        {"messages": full_request},
                         {"callbacks": callbacks}
                     )
                     print(f"\nToken usage: {cb}")
             else:
                 agent_response = await self.agent.ainvoke(
-                    {"messages": request},
+                    {"messages": full_request},
                     {"callbacks": callbacks}
                 )
             
@@ -198,7 +244,7 @@ class MultiToolAgent:
             interpreted = await interpret_agent_response(agent_response, request, self.model)
             print(f"\n{'='*50}\nFinal answer:\n{interpreted}\n{'='*50}")
         else:
-            agent_response = await self.agent.ainvoke({"messages": request})
+            agent_response = await self.agent.ainvoke({"messages": full_request})
             interpreted = await interpret_agent_response(agent_response, request, self.model)
         
         return {
