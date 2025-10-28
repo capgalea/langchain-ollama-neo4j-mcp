@@ -118,6 +118,9 @@ def get_api_url():
 
 def main():
     """Main function to run the Streamlit application."""
+    import datetime
+    import json
+    
     # Set up the Streamlit interface
     st.set_page_config(layout="wide")
     st.title("LangChain + Ollama + Neo4j MCP Demo")
@@ -127,6 +130,8 @@ def main():
         st.session_state.chat_history = []
     if "last_model" not in st.session_state:
         st.session_state.last_model = MODEL_OPTIONS[0]
+    if "query_history" not in st.session_state:
+        st.session_state.query_history = []
 
     col1, col2 = st.columns([1, 1])
 
@@ -184,6 +189,50 @@ def main():
             else:
                 st.info("Schema information not available")
 
+        # Query History Display
+        with st.expander("📜 Query History", expanded=False):
+            if st.session_state.query_history:
+                st.markdown(f"**Total Queries: {len(st.session_state.query_history)}**")
+                
+                # Add buttons in columns
+                col_clear, col_export = st.columns(2)
+                with col_clear:
+                    if st.button("🗑️ Clear History"):
+                        st.session_state.query_history = []
+                        st.rerun()
+                
+                with col_export:
+                    history_json = json.dumps(st.session_state.query_history, indent=2)
+                    st.download_button(
+                        label="📥 Export JSON",
+                        data=history_json,
+                        file_name=f"query_history_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                        mime="application/json"
+                    )
+                
+                st.markdown("---")
+                
+                # Display queries in reverse order (most recent first)
+                for idx, entry in enumerate(reversed(st.session_state.query_history)):
+                    with st.container():
+                        st.markdown(f"**Query #{len(st.session_state.query_history) - idx}** - *{entry['timestamp']}*")
+                        st.markdown(f"**Model:** `{entry['model']}`")
+                        st.markdown(f"**Question:** {entry['query']}")
+                        
+                        # Show response in a code block if it's short, or expander if long
+                        if len(entry['response']) < 500:
+                            st.markdown(f"**Answer:** {entry['response']}")
+                        else:
+                            with st.expander("Show Answer"):
+                                st.markdown(entry['response'])
+                        
+                        if 'execution_time' in entry:
+                            st.caption(f"⏱️ {entry['execution_time']:.2f}s")
+                        
+                        st.markdown("---")
+            else:
+                st.info("No queries yet. Start asking questions!")
+
         # Chat input
         user_input = st.chat_input("Type your message and press Enter...")
 
@@ -192,6 +241,7 @@ def main():
             st.session_state.chat_history.append(("user", user_input))
             
             # Call the FastAPI endpoint
+            execution_time = 0
             try:
                 with st.spinner(f"Processing with {selected_model}... This may take a few minutes..."):
                     response = requests.get(
@@ -203,6 +253,7 @@ def main():
                 if response.status_code == 200:
                     result = response.json()
                     agent_response = result.get("result", "No response")
+                    execution_time = result.get("seconds_to_complete", 0)
                 else:
                     agent_response = f"Error: {response.status_code} - {response.text}"
             except requests.exceptions.Timeout:
@@ -211,6 +262,15 @@ def main():
                 agent_response = f"Request failed: {str(e)}"
             
             st.session_state.chat_history.append(("agent", agent_response))
+            
+            # Add to query history
+            st.session_state.query_history.append({
+                "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "model": selected_model,
+                "query": user_input,
+                "response": agent_response,
+                "execution_time": execution_time
+            })
 
         # Display chat history using st.chat_message (most recent at top)
         for role, msg in reversed(st.session_state.chat_history):
