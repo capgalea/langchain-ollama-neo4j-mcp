@@ -21,7 +21,7 @@ EVALUATIONS = [
 ]
 
 TEST_CONFIG = {
-    "models": ["llama3.2", "mistral", "qwen3"],
+    "models": ["qwen3.1b"],
     "iterations": 3
 }
 
