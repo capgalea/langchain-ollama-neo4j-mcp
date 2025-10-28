@@ -1,6 +1,8 @@
 import streamlit as st
+import streamlit.components.v1 as components
 from neo4j import GraphDatabase
 from collections import defaultdict
+from pydantic import SecretStr
 import requests
 import asyncio
 import os
@@ -15,13 +17,36 @@ import tempfile
 
 
 # Update options from `ollama list` here
-MODEL_OPTIONS = ["llama3.2", "mistral", "qwen3"]
+# Supports Ollama (local), OpenAI (GPT), and Anthropic (Claude) models
+MODEL_OPTIONS = [
+    # Ollama local models
+    "qwen2.5:1.5b",
+    # OpenAI models (requires OPENAI_API_KEY)
+    "gpt-4o",
+    "gpt-4o-mini",
+    # Anthropic Claude models (requires ANTHROPIC_API_KEY)
+    "claude-3-5-sonnet-20241022",
+    "claude-opus-4-20250514",
+]
+
+def load_llm_api_keys():
+    # ...existing code...
+    openai_key = st.secrets.get("openai_api_key") or st.secrets.get("openai", {}).get("api_key") or os.getenv("OPENAI_API_KEY")
+    anthropic_key = st.secrets.get("anthropic_api_key") or st.secrets.get("anthropic", {}).get("api_key") or os.getenv("ANTHROPIC_API_KEY")
+    return {
+        "openai": SecretStr(openai_key or ""),
+        "anthropic": SecretStr(anthropic_key or "")
+    }
 
 def get_neo4j_graph():
     uri = os.environ.get("NEO4J_URI")
     user = os.environ.get("NEO4J_USERNAME")
     password = os.environ.get("NEO4J_PASSWORD")
     database = os.environ.get("NEO4J_DATABASE", "neo4j")
+    
+    if not uri or not user or not password:
+        raise ValueError("Neo4j connection parameters (NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD) must be set in environment variables")
+    
     driver = GraphDatabase.driver(uri, auth=(user, password))
     nodes = {}
     node_labels = defaultdict(set)
@@ -86,8 +111,8 @@ def run_async(coro):
 @st.cache_resource(show_spinner=False)
 def get_api_url():
     # You can make this configurable if needed
-    host = os.environ.get("FASTAPI_HOST", os.environ.get("FASTAPI_HOST"))
-    port = os.environ.get("FASTAPI_PORT", os.environ.get("FASTAPI_PORT"))
+    host = os.environ.get("FASTAPI_HOST", "127.0.0.1")
+    port = os.environ.get("FASTAPI_PORT", "8002")
     return f"http://{host}:{port}"
 
 
@@ -127,17 +152,20 @@ def main():
             
             # Call the FastAPI endpoint
             try:
-                response = requests.get(
-                    f"{get_api_url()}/query",
-                    params={"command": user_input, "model": selected_model},
-                    timeout=120
-                )
+                with st.spinner(f"Processing with {selected_model}... This may take a few minutes..."):
+                    response = requests.get(
+                        f"{get_api_url()}/query",
+                        params={"command": user_input, "model": selected_model},
+                        timeout=300  # Increased to 5 minutes
+                    )
                 
                 if response.status_code == 200:
                     result = response.json()
                     agent_response = result.get("result", "No response")
                 else:
                     agent_response = f"Error: {response.status_code} - {response.text}"
+            except requests.exceptions.Timeout:
+                agent_response = f"Request timed out after 5 minutes. The query may be too complex or the model is taking too long. Try a simpler query or a faster model."
             except Exception as e:
                 agent_response = f"Request failed: {str(e)}"
             
@@ -150,12 +178,12 @@ def main():
 
     with col2:
         st.header("Graph Viewer")
-        net = Network(height="500px", width="100%", bgcolor="#222222", font_color="white")
+        net = Network(height="500px", width="100%", bgcolor="#222222", font_color=True)
         net = update_graph_from_neo4j(net)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp_file:
             net.write_html(tmp_file.name)
             html_content = open(tmp_file.name, "r").read()
-            st.components.v1.html(html_content, height=550, scrolling=True)
+            components.html(html_content, height=550, scrolling=True)
 
 if __name__ == "__main__":
     main()
