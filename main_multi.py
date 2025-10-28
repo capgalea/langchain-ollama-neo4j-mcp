@@ -17,32 +17,33 @@ from main_simple import get_model, interpret_agent_response
 
 # Define multiple MCP servers
 MCP_SERVER_CONFIGS = {
-        "neo4j-cypher": {
-            "command": "uvx",
-            "args": ["mcp-neo4j-cypher@0.2.4", "--transport", "stdio"],
-            "transport": "stdio",
-            "env": os.environ
-        },
-        "neo4j-data-modeling": {
-            "command": "uvx",
-            "args": ["mcp-neo4j-data-modeling@0.1.1", "--transport", "stdio"],
-            "transport": "stdio",
-            "env": os.environ
-        },
-        "memory": {
-            "command": "uvx",
-            "args": [ "mcp-neo4j-memory@0.1.5" ],
-            "transport": "stdio",
-            "env": os.environ
-        },
-        # Requires a paid Aura account
-        # "neo4j-aura": {
-        #     "command": "uvx",
-        #     "args": [ "mcp-neo4j-aura-manager@0.2.2" ],
-        #     "transport": "stdio",
-        #     "env": os.environ
-        # }
+    # "neo4j-cypher": {
+    #     "command": "uvx",
+    #     "args": ["mcp-neo4j-cypher@0.2.4", "--transport", "stdio"],
+    #     "transport": "stdio",
+    #     "env": os.environ
+    # }
+    # Commented out additional servers to test one at a time
+    # "neo4j-data-modeling": {
+    #     "command": "uvx",
+    #     "args": ["mcp-neo4j-data-modeling@0.1.1", "--transport", "stdio"],
+    #     "transport": "stdio",
+    #     "env": os.environ
+    # },
+    # "memory": {
+    #     "command": "uvx",
+    #     "args": [ "mcp-neo4j-memory@0.1.5" ],
+    #     "transport": "stdio",
+    #     "env": os.environ
+    # },
+    # Requires a paid Aura account
+    "neo4j-aura": {
+        "command": "uvx",
+        "args": ["mcp-neo4j-cypher@0.2.4", "--transport", "stdio"],
+        "transport": "stdio",
+        "env": os.environ
     }
+}
 
 # LESS ELEGANT but workable way to define multiple MCP servers - stdio only
 async def get_tools_from_server(server_name: str, server_cfg: dict):
@@ -50,7 +51,6 @@ async def get_tools_from_server(server_name: str, server_cfg: dict):
     params = StdioServerParameters(
         command=server_cfg["command"],
         args=server_cfg["args"],
-        transport=server_cfg["transport"],
         env=server_cfg["env"]
     )
     async with stdio_client(params) as (read, write):
@@ -59,6 +59,14 @@ async def get_tools_from_server(server_name: str, server_cfg: dict):
             tools = await load_mcp_tools(session)
             return tools
         
+def sanitize_tool_name(name: str) -> str:
+    """Sanitize tool name to match Claude's pattern: ^[a-zA-Z0-9_-]{1,128}$"""
+    import re
+    # Replace any invalid characters with underscores
+    sanitized = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
+    # Ensure it's within 128 characters
+    return sanitized[:128]
+
 async def get_all_tools(configs: dict):
     """Get all tools from all servers"""
     # Get all tools from all servers in parallel
@@ -67,6 +75,13 @@ async def get_all_tools(configs: dict):
     ])
     # Flatten the list of lists
     all_tools = [tool for tools in all_tools_lists for tool in tools]
+
+    # Sanitize tool names for Claude compatibility
+    for tool in all_tools:
+        original_name = tool.name
+        tool.name = sanitize_tool_name(tool.name)
+        if original_name != tool.name:
+            print(f"Sanitized tool name: {original_name} -> {tool.name}")
 
     print("\nAvailable tools:")
     for tool in all_tools:
@@ -81,21 +96,79 @@ async def get_multi_tools(configs: list[dict]):
 
 
 class MultiToolAgent:
-    def __init__(self, model: str, configs: list[dict]):
+    def __init__(self, model: str, configs: dict):
         self.model = model
         self.configs = configs
         self.agent = None
         self.tools = None
+        self._sessions = []  # Keep track of active sessions
+        self._clients = []   # Keep track of active clients
 
     async def initialize(self):
         """Initialize the agent with tools from all configured servers"""
-        # LESS ELEGANT approach
-        # self.tools = await get_all_tools(self.configs)
+        try:
+            # Create new sessions and keep them alive
+            all_tools = []
+            
+            for name, cfg in self.configs.items():
+                params = StdioServerParameters(
+                    command=cfg["command"],
+                    args=cfg["args"],
+                    env=cfg["env"]
+                )
+                
+                # Create and store client and session
+                client = stdio_client(params)
+                read, write = await client.__aenter__()
+                self._clients.append((client, read, write))
+                
+                session = ClientSession(read, write)
+                await session.__aenter__()
+                await session.initialize()
+                self._sessions.append(session)
+                
+                # Load tools from this session
+                tools = await load_mcp_tools(session)
+                all_tools.extend(tools)
+            
+            # Sanitize tool names for Claude compatibility
+            for tool in all_tools:
+                original_name = tool.name
+                tool.name = sanitize_tool_name(tool.name)
+                if original_name != tool.name:
+                    print(f"Sanitized tool name: {original_name} -> {tool.name}")
+            
+            print("\nAvailable tools:")
+            for tool in all_tools:
+                print(f"- {tool.name}: {tool.description}")
+            
+            self.tools = all_tools
+            self.agent = create_react_agent(get_model(self.model), self.tools)
+            return self
+        except Exception as e:
+            print(f"Error initializing agent: {e}")
+            import traceback
+            traceback.print_exc()
+            # Clean up on error
+            await self.cleanup()
+            raise
 
-        # MORE ELEGANT approach
-        self.tools = await get_multi_tools(self.configs)
-        self.agent = create_react_agent(get_model(self.model), self.tools)
-        return self
+    async def cleanup(self):
+        """Clean up all MCP sessions and clients"""
+        for session in self._sessions:
+            try:
+                await session.__aexit__(None, None, None)
+            except:
+                pass
+        
+        for client, read, write in self._clients:
+            try:
+                await client.__aexit__(None, None, None)
+            except:
+                pass
+        
+        self._sessions = []
+        self._clients = []
 
     async def run_request(self, request: str, with_logging: bool = False) -> dict:
         """Internal method to process a request with optional logging"""
