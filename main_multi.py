@@ -192,22 +192,33 @@ class MultiToolAgent:
         self._clients = []
 
     def _format_schema_context(self, schema_data):
-        """Format schema data for LLM context"""
+        """Format schema data for LLM context - ultra-concise version"""
         if not schema_data:
             return ""
         
-        context = "\n\nDATABASE SCHEMA:\n"
+        # Create minimal schema summary
+        context = "\n\nNeo4j Schema Summary:\n"
+        node_types = []
+        
         for node_info in schema_data:
             label = node_info.get('label', 'Unknown')
-            context += f"\nNode: {label}\n"
-            
             attrs = node_info.get('attributes', {})
-            if attrs:
-                context += "  Properties: " + ", ".join(f"{k} ({v})" for k, v in attrs.items()) + "\n"
-            
             rels = node_info.get('relationships', {})
-            if rels:
-                context += "  Relationships: " + ", ".join(f"{k} -> {v}" for k, v in rels.items()) + "\n"
+            
+            # Only show unique/indexed properties (most important ones)
+            key_props = [k for k, v in attrs.items() if 'unique' in str(v).lower() or 'indexed' in str(v).lower()]
+            if not key_props and attrs:
+                # If no unique props, just show first 2 properties
+                key_props = list(attrs.keys())[:2]
+            
+            # Format: NodeType(key_property) -[REL]-> TargetType
+            rel_summary = ", ".join(f"-[{k}]->{v}" for k, v in list(rels.items())[:3]) if rels else ""
+            prop_summary = f"({', '.join(key_props[:2])})" if key_props else ""
+            
+            node_types.append(f"{label}{prop_summary} {rel_summary}".strip())
+        
+        context += "; ".join(node_types)
+        context += "\nUse get_neo4j_schema tool for full details if needed."
         
         return context
 
@@ -216,9 +227,13 @@ class MultiToolAgent:
         if not self.agent:
             await self.initialize()
 
-        # Inject schema context into request
+        # Only inject schema context for database-related queries (to avoid token limits)
+        # Check if query mentions database-related terms
+        db_keywords = ['grant', 'researcher', 'organization', 'funding', 'field', 'how many', 'count', 'find', 'show', 'list', 'get', 'database']
+        should_include_schema = any(keyword in request.lower() for keyword in db_keywords)
+        
         full_request = request
-        if hasattr(self, 'schema_context') and self.schema_context:
+        if should_include_schema and hasattr(self, 'schema_context') and self.schema_context:
             full_request = self.schema_context + "\n\nUSER REQUEST: " + request
 
         start_time = time.time()
