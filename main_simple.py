@@ -3,6 +3,8 @@ from mcp.client.stdio import stdio_client
 from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.prebuilt import create_react_agent
 from langchain_ollama import ChatOllama
+from langchain_openai import ChatOpenAI
+from langchain_anthropic import ChatAnthropic
 import asyncio
 import os
 
@@ -13,16 +15,40 @@ load_dotenv()
 server_params = StdioServerParameters(
     command="uvx",
     args=["mcp-neo4j-cypher@0.2.4", "--transport", "stdio"],
-    transport="stdio",
-    env=os.environ
+    env=dict(os.environ)
 )
 
 def get_model(model_name):
-    return ChatOllama(
-        model=model_name,
-        temperature=0.0,
-        streaming=False  # Disable streaming for better compatibility
-    )
+    """
+    Get the appropriate language model based on the model name.
+    Supports Ollama, OpenAI (GPT), and Anthropic (Claude) models.
+    Note: OpenAI and Anthropic models require OPENAI_API_KEY and ANTHROPIC_API_KEY 
+    environment variables to be set.
+    """
+    # OpenAI models
+    if model_name.startswith("gpt-"):
+        # ChatOpenAI reads from OPENAI_API_KEY env var by default
+        return ChatOpenAI(
+            model=model_name,  # type: ignore
+            temperature=0.0  # type: ignore
+        )
+    
+    # Anthropic Claude models
+    elif "claude" in model_name.lower():
+        # ChatAnthropic reads from ANTHROPIC_API_KEY env var by default
+        return ChatAnthropic(
+            model_name=model_name,
+            temperature=0.0,
+            timeout=300.0,
+            stop=[]  # type: ignore
+        )
+    
+    # Ollama models (default)
+    else:
+        return ChatOllama(
+            model=model_name,
+            temperature=0.0
+        )
 
 def extract_content(val):
     # Helper to get .content if present, else str
