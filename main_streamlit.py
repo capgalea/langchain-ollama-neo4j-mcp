@@ -1,6 +1,6 @@
 import streamlit as st
 import streamlit.components.v1 as components
-from neo4j import GraphDatabase
+from neo4j import GraphDatabase, Query
 from collections import defaultdict
 from pydantic import SecretStr
 import requests
@@ -26,8 +26,8 @@ MODEL_OPTIONS = [
     "gpt-4o",
     "gpt-4o-mini",
     # Anthropic Claude models (requires ANTHROPIC_API_KEY)
-    "claude-3-5-sonnet-20241022",
-    "claude-opus-4-20250514",
+    "claude-sonnet-4-5-20250929",  # Claude 4.5 Sonnet
+    "claude-sonnet-4-20250514",   # Claude 4.0 Sonnet
 ]
 
 def load_llm_api_keys():
@@ -95,10 +95,10 @@ def get_neo4j_graph(cypher_query=None, limit=100):
                     start_id = value.start_node.element_id if hasattr(value.start_node, 'element_id') else str(value.start_node.id)
                     end_id = value.end_node.element_id if hasattr(value.end_node, 'element_id') else str(value.end_node.id)
                     edges.append((start_id, end_id, value.type))
-        
-        # Also check for explicit n, r, m pattern
-        if 'n' in record.keys() and 'r' in record.keys() and 'm' in record.keys():
-            pass  # Already handled above
+            
+            # Also check for explicit n, r, m pattern within the loop
+            if 'n' in record.keys() and 'r' in record.keys() and 'm' in record.keys():
+                pass  # Already handled above
     
     driver.close()
     return nodes, node_labels, node_properties, edges
@@ -199,14 +199,16 @@ def extract_cypher_query(response_text):
         patterns = [
             r'```cypher\s*(.*?)\s*```',  # Code block with cypher
             r'```\s*(MATCH.*?RETURN.*?)\s*```',    # Code block with MATCH...RETURN  
-            r'(MATCH\s+.*?RETURN.*?)(?:\n\n|\Z)',  # MATCH...RETURN until double newline or end
+            r'(MATCH\s+\(.*?\)\s*(?:MATCH\s+\(.*?\)\s*)*WHERE\s+.*?RETURN\s+.*?)(?:\n\n|LIMIT|\Z)',  # Full MATCH...WHERE...RETURN with optional LIMIT
+            r'(MATCH\s+.*?RETURN\s+.*?)(?:\n\n|ORDER BY|LIMIT|\Z)',  # MATCH...RETURN with optional ORDER BY or LIMIT
         ]
         
         query = None
         for pattern in patterns:
-            match = re.search(pattern, response_text, re.IGNORECASE | re.DOTALL)
-            if match:
-                query = match.group(1).strip()
+            matches = list(re.finditer(pattern, response_text, re.IGNORECASE | re.DOTALL))
+            if matches:
+                # Get the last match (most likely the successful query)
+                query = matches[-1].group(1).strip()
                 break
         
         if not query:
@@ -242,7 +244,7 @@ def get_query_results_as_dataframe(cypher_query, limit=100):
     from neo4j import GraphDatabase
     
     neo4j_uri = os.environ.get("NEO4J_URI")
-    neo4j_user = os.environ.get("NEO4J_USER")
+    neo4j_user = os.environ.get("NEO4J_USERNAME") or os.environ.get("NEO4J_USER")
     neo4j_password = os.environ.get("NEO4J_PASSWORD")
     
     if not all([neo4j_uri, neo4j_user, neo4j_password]):
@@ -250,7 +252,8 @@ def get_query_results_as_dataframe(cypher_query, limit=100):
         return None
     
     try:
-        driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
+        # Type assertion to satisfy type checker - we've already validated these are not None
+        driver = GraphDatabase.driver(str(neo4j_uri), auth=(str(neo4j_user), str(neo4j_password)))
         with driver.session() as session:
             # Add LIMIT if not already present
             query = cypher_query
@@ -326,7 +329,7 @@ def main():
     
     # Set up the Streamlit interface
     st.set_page_config(layout="wide")
-    st.title("LangChain + Ollama + Neo4j MCP Demo")
+    st.title("Research Grant Chatbot")
     
     # Initialize session states
     if "chat_history" not in st.session_state:
@@ -335,6 +338,8 @@ def main():
         st.session_state.last_model = MODEL_OPTIONS[0]
     if "query_history" not in st.session_state:
         st.session_state.query_history = []
+    if "selected_previous_query" not in st.session_state:
+        st.session_state.selected_previous_query = None
     if "last_cypher_query" not in st.session_state:
         st.session_state.last_cypher_query = None
     if "visualize_results" not in st.session_state:
@@ -350,10 +355,18 @@ def main():
 
     with col1:
         # Model selection dropdown
+        # Handle case where last_model is no longer in the list
+        try:
+            default_index = MODEL_OPTIONS.index(st.session_state.last_model)
+        except ValueError:
+            # Model no longer available, use first model as default
+            default_index = 0
+            st.session_state.last_model = MODEL_OPTIONS[0]
+        
         selected_model = st.selectbox(
             "Choose LLM model:", 
             MODEL_OPTIONS, 
-            index=MODEL_OPTIONS.index(st.session_state.last_model)
+            index=default_index
         )
 
         # Reset chat history if model changes
@@ -446,8 +459,140 @@ def main():
             else:
                 st.info("No queries yet. Start asking questions!")
 
-        # Chat input
-        user_input = st.chat_input("Type your message and press Enter...")
+        # Query history selector - appears above the input
+        # Debug: Show query history status
+        st.caption(f"📊 Debug: query_history has {len(st.session_state.query_history)} items")
+        
+        if len(st.session_state.query_history) > 0:
+            # Create a list of unique queries (most recent first) - limit to 20
+            seen = set()
+            filtered_queries = []
+            for q in reversed(st.session_state.query_history):
+                query_text = q.get('query', '')
+                if query_text and query_text not in seen:
+                    filtered_queries.append(query_text)
+                    seen.add(query_text)
+                if len(filtered_queries) >= 20:  # Limit to 20 unique queries
+                    break
+            
+            if filtered_queries:  # Only show if we have queries after filtering
+                st.caption(f"📊 Debug: filtered to {len(filtered_queries)} unique queries")
+                
+                # Add empty option at the beginning
+                filtered_queries = ["-- Select a previous query --"] + filtered_queries
+                
+                selected_history = st.selectbox(
+                    "📜 Previous Queries (select to reuse):",
+                    options=filtered_queries,
+                    index=0,  # Always default to "Select..." option
+                    key="history_selector"
+                )
+                
+                # Update the current query if a previous one is selected
+                if selected_history and selected_history != "-- Select a previous query --":
+                    st.session_state.current_query_text = selected_history
+            else:
+                st.caption("📊 Debug: No queries after filtering")
+        else:
+            st.caption("📊 Debug: query_history is empty")
+
+        # Initialize current_query_text if not exists
+        if "current_query_text" not in st.session_state:
+            st.session_state.current_query_text = ""
+
+        # Chat input - use text_input with form for better control
+        with st.form(key="query_form", clear_on_submit=False):
+            col_input, col_button = st.columns([5, 1])
+            with col_input:
+                user_input = st.text_input(
+                    "Type your message:",
+                    value=st.session_state.current_query_text,
+                    placeholder="Ask a question about the database...",
+                    label_visibility="collapsed",
+                    key="query_input"
+                )
+            with col_button:
+                submit_button = st.form_submit_button("Send", use_container_width=True, type="primary")
+        
+        # Process submission and clear the text box
+        if submit_button and user_input:
+            # Store the input for processing
+            query_to_process = user_input
+            # Clear the text box immediately for next query
+            st.session_state.current_query_text = ""
+            # Set user_input to the stored value for processing
+            user_input = query_to_process
+        elif not submit_button:
+            user_input = None
+
+        # Display interactive table if we have a recent query with Cypher
+        # Show this right after input box, before chat history
+        
+        # Debug: Always show current state
+        if st.session_state.last_cypher_query:
+            st.caption(f"🔍 Debug: last_cypher_query exists ({len(st.session_state.last_cypher_query)} chars)")
+        else:
+            st.caption(f"🔍 Debug: last_cypher_query = None")
+            # Try to get from query history as fallback
+            if st.session_state.query_history:
+                for q in reversed(st.session_state.query_history):
+                    cypher = q.get('cypher_query', '')
+                    if cypher:
+                        st.session_state.last_cypher_query = cypher
+                        st.caption(f"🔍 Debug: Recovered Cypher from history ({len(cypher)} chars)")
+                        break
+        
+        if st.session_state.last_cypher_query:
+            st.divider()
+            
+            # Make the entire table section collapsible
+            with st.expander("📊 Query Results Table", expanded=True):
+                # Show the extracted query for debugging
+                with st.expander("🔍 Extracted Cypher Query", expanded=False):
+                    st.code(st.session_state.last_cypher_query, language="cypher")
+                
+                st.info(f"🔍 Attempting to execute query and generate table...")
+                
+                try:
+                    with st.spinner("Loading query results..."):
+                        st.info(f"🔍 Calling get_query_results_as_dataframe...")
+                        df = get_query_results_as_dataframe(st.session_state.last_cypher_query, limit=1000)
+                        st.info(f"🔍 Result: df is {type(df)}, None={df is None}, Empty={df.empty if df is not None else 'N/A'}")
+                        
+                        if df is not None and not df.empty:
+                            st.success(f"✅ Found {len(df)} records with {len(df.columns)} columns")
+                            
+                            # Display the dataframe
+                            st.dataframe(
+                                df,
+                                use_container_width=True,
+                                height=400,
+                                hide_index=False
+                            )
+                            
+                            # Add download button
+                            csv = df.to_csv(index=False)
+                            st.download_button(
+                                label="📥 Download as CSV",
+                                data=csv,
+                                file_name=f"query_results_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                mime="text/csv"
+                            )
+                        elif df is not None:
+                            st.warning("⚠️ Query executed but returned no data.")
+                        else:
+                            st.error("❌ Could not generate table. Check the Cypher query above for errors.")
+                except Exception as e:
+                    st.error(f"❌ Error generating table: {str(e)}")
+                    import traceback
+                    with st.expander("Show Error Details"):
+                        st.code(traceback.format_exc())
+            
+            st.divider()
+        else:
+            # Debug: Show why table is not appearing
+            if st.session_state.chat_history:
+                st.info("💡 Tip: The interactive table will appear here after a query that returns data from Neo4j.")
 
         # Process user input
         if user_input:
@@ -469,19 +614,118 @@ def main():
                     result = response.json()
                     agent_response = result.get("result", "No response")
                     execution_time = result.get("seconds_to_complete", 0)
-                    
-                    # Try to extract Cypher query from the raw response
                     raw_response = result.get("raw", "")
-                    cypher_query = extract_cypher_query(str(raw_response))
                     
-                    # If not in raw, try in the result
-                    if not cypher_query:
-                        cypher_query = extract_cypher_query(agent_response)
+                    # Check if FastAPI sent the Cypher query directly
+                    cypher_query = result.get("cypher_query", "")
+                    
+                    if cypher_query:
+                        st.success(f"✅ FastAPI provided Cypher query ({len(cypher_query)} chars)")
+                        st.code(cypher_query, language="cypher")
+                    else:
+                        # Fallback: Try to extract from raw response
+                        st.info("🔍 Attempting to extract Cypher from raw response...")
+                        
+                        # Debug: Show what we're extracting from
+                        st.info(f"🔍 Debug: raw_response type: {type(raw_response)}, length: {len(str(raw_response))}")
+                        
+                        # Strategy 1: Parse raw_response as a structured object
+                        import re
+                        import json
+                        
+                        # If raw_response is a string representation of a list/dict, try to parse it
+                        if isinstance(raw_response, str):
+                            # Try multiple patterns with different quote handling
+                            patterns = [
+                                # Pattern 1: Single quotes with proper ending
+                                r"'query'\s*:\s*'((?:[^'\\]|\\.)*)'\s*[,}]",
+                                # Pattern 2: Double quotes with proper ending
+                                r'"query"\s*:\s*"((?:[^"\\]|\\.)*)"\s*[,}]',
+                                # Pattern 3: More flexible with escaped content
+                                r"query['\"]?\s*:\s*['\"]([^'\"]*(?:\\.[^'\"]*)*)['\"]",
+                                # Pattern 4: Original flexible pattern as fallback
+                                r"read_neo4j_cypher.*?query['\"]?\s*:\s*['\"](.+?)['\"]"
+                            ]
+                            
+                            for idx, tool_pattern in enumerate(patterns):
+                                matches = re.findall(tool_pattern, raw_response, re.DOTALL | re.IGNORECASE)
+                                if matches:
+                                    cypher_query = matches[-1]  # Get last match
+                                    st.success(f"✅ Found Cypher in raw response (pattern {idx+1})")
+                                    break
+                        
+                        # If raw_response is already a list/dict
+                        elif isinstance(raw_response, (list, dict)):
+                            st.info("📋 raw_response is structured data")
+                            # Convert to string and search with better patterns
+                            raw_str = str(raw_response)
+                            
+                            patterns = [
+                                # Pattern 1: Single quotes with escaped content
+                                r"'query'\s*:\s*'((?:[^'\\]|\\.)*)'\s*[,}]",
+                                # Pattern 2: Double quotes with escaped content  
+                                r'"query"\s*:\s*"((?:[^"\\]|\\.)*)"\s*[,}]',
+                                # Pattern 3: Simpler fallback
+                                r"'query'\s*:\s*'([^']+)'"
+                            ]
+                            
+                            for idx, tool_pattern in enumerate(patterns):
+                                matches = re.findall(tool_pattern, raw_str, re.DOTALL)
+                                if matches:
+                                    cypher_query = matches[-1]
+                                    st.success(f"✅ Found Cypher in structured raw response (pattern {idx+1})")
+                                    break
+                        
+                        # Clean up the extracted query if found
+                        if cypher_query:
+                            # Unescape characters
+                            cypher_query = cypher_query.replace('\\n', '\n').replace("\\'", "'").replace('\\"', '"').replace('\\\\', '\\')
+                            
+                            # Remove leading/trailing whitespace
+                            cypher_query = cypher_query.strip()
+                            
+                            # Remove any leading backslashes or control characters
+                            while cypher_query and cypher_query[0] in ['\\', '\n', '\r', '\t']:
+                                cypher_query = cypher_query[1:].strip()
+                            
+                            # Validate it starts with a valid Cypher keyword
+                            valid_starts = ['MATCH', 'CREATE', 'MERGE', 'RETURN', 'WITH', 'UNWIND', 'CALL', 'OPTIONAL', 'SHOW']
+                            if cypher_query:
+                                first_word = cypher_query.split()[0].upper()
+                                if first_word not in valid_starts:
+                                    st.warning(f"⚠️ Query starts with '{first_word}', not a valid Cypher keyword. Discarding.")
+                                    cypher_query = None
+                        
+                        # Fallback: use the extraction function on both raw and agent response
+                        if not cypher_query:
+                            cypher_query = extract_cypher_query(str(raw_response))
+                            if cypher_query:
+                                st.success(f"✅ Extracted via extract_cypher_query from raw_response")
+                        
+                        # Last resort: try extracting from agent_response
+                        if not cypher_query:
+                            cypher_query = extract_cypher_query(agent_response)
+                            if cypher_query:
+                                st.success(f"✅ Extracted via extract_cypher_query from agent_response")
+                        
+                        # Show what we found
+                        if cypher_query:
+                            st.code(cypher_query[:200] + "..." if len(cypher_query) > 200 else cypher_query, language="cypher")
+                            st.info(f"📝 Query to store: {repr(cypher_query[:100])}")
+                        else:
+                            st.warning("⚠️ Could not extract Cypher query from any source")
+                            with st.expander("🔍 Debug: Show raw_response sample"):
+                                st.text(str(raw_response)[:10000])  # Show more characters
+                                st.info(f"Total length: {len(str(raw_response))} characters")
                     
                     # Store for visualization
                     if cypher_query:
                         st.session_state.last_cypher_query = cypher_query
                         st.session_state.visualize_results = True
+                        st.info(f"💾 Stored in session state (length: {len(cypher_query)} chars)")
+                        # Note: Removed st.rerun() here to allow query_history to be updated
+                    else:
+                        st.warning("⚠️ No Cypher query to store")
                 else:
                     agent_response = f"Error: {response.status_code} - {response.text}"
             except requests.exceptions.Timeout:
@@ -492,55 +736,22 @@ def main():
             st.session_state.chat_history.append(("agent", agent_response))
             
             # Add to query history
-            st.session_state.query_history.append({
+            query_entry = {
                 "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "model": selected_model,
                 "query": user_input,
                 "response": agent_response,
                 "execution_time": execution_time,
                 "cypher_query": cypher_query
-            })
+            }
+            st.session_state.query_history.append(query_entry)
+            st.info(f"📝 Debug: Added query to history. Total queries: {len(st.session_state.query_history)}")
+            st.info(f"📝 Debug: Last query text: {user_input[:50]}...")
 
         # Display chat history using st.chat_message (most recent at top)
         for role, msg in reversed(st.session_state.chat_history):
             with st.chat_message("user" if role == "user" else "assistant"):
                 st.markdown(msg)
-        
-        # Display interactive table if we have a recent query with Cypher
-        if st.session_state.last_cypher_query:
-            st.divider()
-            st.subheader("📊 Query Results Table")
-            
-            # Show the extracted query for debugging
-            with st.expander("🔍 Extracted Cypher Query", expanded=False):
-                st.code(st.session_state.last_cypher_query, language="cypher")
-            
-            with st.spinner("Loading query results..."):
-                df = get_query_results_as_dataframe(st.session_state.last_cypher_query, limit=1000)
-                
-                if df is not None and not df.empty:
-                    st.success(f"✅ Found {len(df)} records with {len(df.columns)} columns")
-                    
-                    # Display the dataframe
-                    st.dataframe(
-                        df,
-                        use_container_width=True,
-                        height=400,
-                        hide_index=False
-                    )
-                    
-                    # Add download button
-                    csv = df.to_csv(index=False)
-                    st.download_button(
-                        label="📥 Download as CSV",
-                        data=csv,
-                        file_name=f"query_results_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime="text/csv"
-                    )
-                elif df is not None:
-                    st.warning("⚠️ Query executed but returned no data.")
-                else:
-                    st.error("❌ Could not generate table. Check the Cypher query above for errors.")
 
     with col2:
         st.header("Graph Viewer")
