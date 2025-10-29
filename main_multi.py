@@ -250,6 +250,10 @@ class MultiToolAgent:
             cypher_instruction += "To avoid duplicates when using MATCH (r)-[:TYPE1|TYPE2]->(g), use DISTINCT or group by the target entity.\n"
             cypher_instruction += "Example with DISTINCT: MATCH (r:Researcher)-[:CHIEF_INVESTIGATOR_ON|COLLABORATOR_ON]->(g:Grant) RETURN DISTINCT g.Grant_Title, g.Application_ID, g.Total_Amount\n"
             cypher_instruction += "Example with single relationship: MATCH (r:Researcher)-[:CHIEF_INVESTIGATOR_ON]->(g:Grant) -- Only shows grants where they are chief investigator\n"
+            cypher_instruction += "\nPREFERRED TABLE FORMAT: Return one row per entity (e.g., one row per grant) with simple scalar values.\n"
+            cypher_instruction += "AVOID using collect() to aggregate data into lists - this makes tables hard to read.\n"
+            cypher_instruction += "GOOD: MATCH (r:Researcher)-[rel:CHIEF_INVESTIGATOR_ON|COLLABORATOR_ON]->(g:Grant) WHERE toLower(r.CI_Name) CONTAINS toLower('name') RETURN DISTINCT r.CI_Name, g.Application_ID, g.Grant_Title, g.Total_Amount, type(rel) as Relationship_Type\n"
+            cypher_instruction += "BAD: MATCH (r:Researcher)-[:CHIEF_INVESTIGATOR_ON]->(g:Grant) RETURN r.CI_Name, collect({title: g.Grant_Title, amount: g.Total_Amount}) as grants  -- Avoid collect()\n"
             
             if hasattr(self, 'schema_context') and self.schema_context:
                 full_request = self.schema_context + cypher_instruction + "\n\nUSER REQUEST: " + request
