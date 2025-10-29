@@ -280,8 +280,36 @@ def get_query_results_as_dataframe(cypher_query, limit=100):
                         # Simple types - use directly
                         row[key] = value
                     elif isinstance(value, list):
-                        # Lists - convert to string representation
-                        row[key] = str(value)
+                        # Lists - check if it's a list of nodes/dicts or simple values
+                        if not value:
+                            row[key] = ""
+                        elif len(value) == 1 and isinstance(value[0], dict):
+                            # Single dict in list - extract key properties
+                            d = value[0]
+                            # Format as readable string with key fields
+                            parts = []
+                            for k in ['Application_ID', 'Grant_ID', 'title', 'Grant_Title', 'amount', 'Total_Amount', 'research_area', 'Research_Area']:
+                                if k in d:
+                                    parts.append(f"{k}: {d[k]}")
+                            row[key] = " | ".join(parts) if parts else str(value[0])
+                        elif all(isinstance(item, dict) for item in value):
+                            # Multiple dicts - show count and first item summary
+                            d = value[0]
+                            parts = []
+                            for k in ['Application_ID', 'Grant_ID', 'title', 'Grant_Title', 'amount', 'Total_Amount']:
+                                if k in d:
+                                    parts.append(f"{k}: {d[k]}")
+                            first_item = " | ".join(parts) if parts else str(d)
+                            if len(value) > 1:
+                                row[key] = f"[{len(value)} items] First: {first_item}"
+                            else:
+                                row[key] = first_item
+                        elif all(isinstance(item, str) for item in value):
+                            # List of strings - join with commas
+                            row[key] = ", ".join(value)
+                        else:
+                            # Mixed or other types - convert to string
+                            row[key] = str(value)
                     elif hasattr(value, '__class__'):
                         class_name = value.__class__.__name__
                         if class_name == 'Node':
@@ -616,6 +644,10 @@ def main():
                     execution_time = result.get("seconds_to_complete", 0)
                     raw_response = result.get("raw", "")
                     
+                    # Debug: Show what we received
+                    st.info(f"🔍 Response keys: {list(result.keys())}")
+                    st.info(f"🔍 Model used: {selected_model}")
+                    
                     # Check if FastAPI sent the Cypher query directly
                     cypher_query = result.get("cypher_query", "")
                     
@@ -623,6 +655,7 @@ def main():
                         st.success(f"✅ FastAPI provided Cypher query ({len(cypher_query)} chars)")
                         st.code(cypher_query, language="cypher")
                     else:
+                        st.warning(f"⚠️ FastAPI did not provide cypher_query field")
                         # Fallback: Try to extract from raw response
                         st.info("🔍 Attempting to extract Cypher from raw response...")
                         
@@ -723,7 +756,21 @@ def main():
                         st.session_state.last_cypher_query = cypher_query
                         st.session_state.visualize_results = True
                         st.info(f"💾 Stored in session state (length: {len(cypher_query)} chars)")
-                        # Note: Removed st.rerun() here to allow query_history to be updated
+                        
+                        # Add to query history BEFORE rerun
+                        query_entry = {
+                            "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "model": selected_model,
+                            "query": user_input,
+                            "response": agent_response,
+                            "execution_time": execution_time,
+                            "cypher_query": cypher_query
+                        }
+                        st.session_state.query_history.append(query_entry)
+                        st.info(f"📝 Stored query in history (total: {len(st.session_state.query_history)} queries)")
+                        
+                        # Now rerun to display the table
+                        st.rerun()
                     else:
                         st.warning("⚠️ No Cypher query to store")
                 else:
@@ -735,18 +782,20 @@ def main():
             
             st.session_state.chat_history.append(("agent", agent_response))
             
-            # Add to query history
-            query_entry = {
-                "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "model": selected_model,
-                "query": user_input,
-                "response": agent_response,
-                "execution_time": execution_time,
-                "cypher_query": cypher_query
-            }
-            st.session_state.query_history.append(query_entry)
-            st.info(f"📝 Debug: Added query to history. Total queries: {len(st.session_state.query_history)}")
-            st.info(f"📝 Debug: Last query text: {user_input[:50]}...")
+            # Note: Query history is now added earlier (before st.rerun()) to prevent loss
+            # The following lines were moved up to happen before rerun when cypher_query exists
+            if not cypher_query:
+                # Only add to history if we didn't already do it above (when there's no cypher_query)
+                query_entry = {
+                    "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "model": selected_model,
+                    "query": user_input,
+                    "response": agent_response,
+                    "execution_time": execution_time,
+                    "cypher_query": ""  # Empty since no query was extracted
+                }
+                st.session_state.query_history.append(query_entry)
+                st.info(f"📝 Debug: Added non-Cypher query to history. Total queries: {len(st.session_state.query_history)}")
 
         # Display chat history using st.chat_message (most recent at top)
         for role, msg in reversed(st.session_state.chat_history):
