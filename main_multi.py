@@ -5,6 +5,8 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.prebuilt import create_react_agent
 from langchain_community.callbacks import get_openai_callback
 from langchain_core.tracers import ConsoleCallbackHandler
+from langchain_core.runnables import RunnableConfig
+from langchain_core.callbacks import BaseCallbackHandler
 import asyncio
 import time
 import os
@@ -90,7 +92,7 @@ async def get_all_tools(configs: dict):
     return all_tools
 
 # MORE ELEGANT way to define multiple MCP servers - supports stdio, sse, and streamable-http
-async def get_multi_tools(configs: list[dict]):
+async def get_multi_tools(configs: dict):
     client = MultiServerMCPClient(configs)
     return await client.get_tools()
 
@@ -219,6 +221,8 @@ class MultiToolAgent:
         
         context += "; ".join(node_types)
         context += "\nUse get_neo4j_schema tool for full details if needed."
+        context += "\n\nIMPORTANT: When creating Cypher queries, ALWAYS use toLower() for text comparisons to ensure case-insensitive matching."
+        context += "\nExample: WHERE toLower(r.CI_Name) CONTAINS toLower('tony velkov')"
         
         return context
 
@@ -226,6 +230,9 @@ class MultiToolAgent:
         """Internal method to process a request with optional logging"""
         if not self.agent:
             await self.initialize()
+        
+        if not self.agent:
+            raise RuntimeError("Agent initialization failed - agent is still None")
 
         # Only inject schema context for database-related queries (to avoid token limits)
         # Check if query mentions database-related terms
@@ -233,27 +240,40 @@ class MultiToolAgent:
         should_include_schema = any(keyword in request.lower() for keyword in db_keywords)
         
         full_request = request
-        if should_include_schema and hasattr(self, 'schema_context') and self.schema_context:
-            full_request = self.schema_context + "\n\nUSER REQUEST: " + request
+        if should_include_schema:
+            # Add strong instruction for case-insensitive matching
+            cypher_instruction = "\n\nCRITICAL INSTRUCTION: When creating Cypher queries, you MUST use toLower() for ALL text comparisons to ensure case-insensitive matching.\nExample: WHERE toLower(property) CONTAINS toLower('search term')\nThis applies to CONTAINS, =, STARTS WITH, ENDS WITH, etc.\n"
+            cypher_instruction += "\nIMPORTANT: The type() function only works on relationships, NOT nodes. To get a relationship type, assign it to a variable in MATCH.\n"
+            cypher_instruction += "Example: MATCH (a)-[rel:REL_TYPE]->(b) RETURN type(rel)  -- CORRECT\n"
+            cypher_instruction += "Example: MATCH (a:Node) RETURN type(a)  -- WRONG (a is a node, not a relationship)\n"
+            cypher_instruction += "\nIMPORTANT: When matching multiple relationship types with OR (using | in the MATCH pattern), you will get duplicate results.\n"
+            cypher_instruction += "To avoid duplicates when using MATCH (r)-[:TYPE1|TYPE2]->(g), use DISTINCT or group by the target entity.\n"
+            cypher_instruction += "Example with DISTINCT: MATCH (r:Researcher)-[:CHIEF_INVESTIGATOR_ON|COLLABORATOR_ON]->(g:Grant) RETURN DISTINCT g.Grant_Title, g.Application_ID, g.Total_Amount\n"
+            cypher_instruction += "Example with single relationship: MATCH (r:Researcher)-[:CHIEF_INVESTIGATOR_ON]->(g:Grant) -- Only shows grants where they are chief investigator\n"
+            
+            if hasattr(self, 'schema_context') and self.schema_context:
+                full_request = self.schema_context + cypher_instruction + "\n\nUSER REQUEST: " + request
+            else:
+                full_request = cypher_instruction + "\n\nUSER REQUEST: " + request
 
         start_time = time.time()
-        
         if with_logging:
             print(f"\n{'='*50}\nProcessing request: {request}\n{'='*50}")
+            callbacks: list[BaseCallbackHandler] = [ConsoleCallbackHandler()]
             callbacks = [ConsoleCallbackHandler()]
-            
             if 'gpt' in self.model.lower():
                 with get_openai_callback() as cb:
                     agent_response = await self.agent.ainvoke(
                         {"messages": full_request},
-                        {"callbacks": callbacks}
+                        config=RunnableConfig(callbacks=callbacks)
                     )
                     print(f"\nToken usage: {cb}")
             else:
                 agent_response = await self.agent.ainvoke(
                     {"messages": full_request},
-                    {"callbacks": callbacks}
+                    config=RunnableConfig(callbacks=callbacks)
                 )
+
             
             print(f"\n{'='*50}\nRaw response:\n{agent_response}\n{'='*50}")
             interpreted = await interpret_agent_response(agent_response, request, self.model)
