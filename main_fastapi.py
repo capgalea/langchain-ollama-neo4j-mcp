@@ -1,16 +1,20 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from main_multi import MultiToolAgent, MCP_SERVER_CONFIGS
 from dotenv import load_dotenv
 import logging
 import os
 
+# Load environment variables first
+load_dotenv()
+
+# Import MultiToolAgent after dotenv is loaded and only when needed
+# This helps avoid multiprocessing issues on Windows
+def get_multi_tool_agent():
+    from main_multi import MultiToolAgent, MCP_SERVER_CONFIGS
+    return MultiToolAgent, MCP_SERVER_CONFIGS
 
 # Get the fastapi logger
 logger = logging.getLogger("fastapi")
-
-# Load environment variables
-load_dotenv()
 
 # Get configuration from environment variables with defaults
 FASTAPI_HOST = os.getenv("FASTAPI_HOST", "0.0.0.0")
@@ -66,11 +70,67 @@ async def query_agent(
         agent = get_agent(model)
         result = await agent.run_request(command, with_logging=False)  # Enable logging for API requests
         
+        # Get the raw response
+        raw_response = result.get("raw", "")
+        
+        # Try to extract Cypher query from the raw agent response
+        cypher_query = ""
+        try:
+            # Strategy 1: Check if raw_response has messages attribute (LangGraph response)
+            if hasattr(raw_response, 'get'):
+                messages = raw_response.get('messages', [])
+                # Look through messages for AIMessage with tool_calls
+                for msg in messages:
+                    if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                        for tool_call in msg.tool_calls:
+                            # Handle dict format
+                            if isinstance(tool_call, dict):
+                                if tool_call.get('name') == 'read_neo4j_cypher':
+                                    cypher_query = tool_call.get('args', {}).get('query', '')
+                                    print(f"✓ Extracted Cypher from dict tool_call: {len(cypher_query)} chars")
+                                    break
+                            # Handle object format
+                            elif hasattr(tool_call, 'name') and hasattr(tool_call, 'args'):
+                                if tool_call.name == 'read_neo4j_cypher':
+                                    # args might be a dict or an object
+                                    if isinstance(tool_call.args, dict):
+                                        cypher_query = tool_call.args.get('query', '')
+                                    elif hasattr(tool_call.args, 'query'):
+                                        cypher_query = tool_call.args.query
+                                    print(f"✓ Extracted Cypher from object tool_call: {len(cypher_query)} chars")
+                                    break
+                    if cypher_query:
+                        break
+            
+            # Strategy 2: Search in string representation if not found
+            if not cypher_query and raw_response:
+                import re
+                raw_str = str(raw_response)
+                # Look for read_neo4j_cypher with query parameter
+                patterns = [
+                    r"'name':\s*'read_neo4j_cypher'.*?'query':\s*'((?:[^'\\]|\\.)*)'\s*[,}]",
+                    r'"name":\s*"read_neo4j_cypher".*?"query":\s*"((?:[^"\\]|\\.)*)"',
+                ]
+                for pattern in patterns:
+                    match = re.search(pattern, raw_str, re.DOTALL)
+                    if match:
+                        cypher_query = match.group(1)
+                        # Unescape
+                        cypher_query = cypher_query.replace('\\n', '\n').replace("\\'", "'").replace('\\"', '"')
+                        print(f"✓ Extracted Cypher via regex: {len(cypher_query)} chars")
+                        break
+                        
+        except Exception as extract_error:
+            print(f"Error extracting Cypher query: {extract_error}")
+            import traceback
+            traceback.print_exc()
+        
         # Ensure all values are JSON serializable
         response = {
             "status": "success", 
             "result": str(result.get("answer", "")),  # Convert to string to ensure serialization
-            "raw": str(result.get("raw", "")),        # Convert raw to string
+            "raw": str(raw_response),        # Convert raw to string
+            "cypher_query": cypher_query,  # Send extracted query separately
             "seconds_to_complete": float(result.get("seconds_to_complete", 0.0))     # Explicitly convert to float
         }
         print(f"API Response: {response}")
@@ -105,7 +165,7 @@ async def get_schema():
 # Cache for agents by model name
 _agent_cache = {}
 
-def get_agent(model: str) -> MultiToolAgent:
+def get_agent(model: str):
     """
     Get a cached agent instance or create a new one if it doesn't exist.
     
@@ -116,6 +176,7 @@ def get_agent(model: str) -> MultiToolAgent:
         MultiToolAgent: A cached or new agent instance
     """
     if model not in _agent_cache:
+        MultiToolAgent, MCP_SERVER_CONFIGS = get_multi_tool_agent()
         _agent_cache[model] = MultiToolAgent(model, MCP_SERVER_CONFIGS)
     return _agent_cache[model]
 
@@ -123,10 +184,14 @@ def get_agent(model: str) -> MultiToolAgent:
 if __name__ == "__main__":
     import uvicorn
     
+    # On Windows with Python 3.13, run without reload to avoid multiprocessing issues
+    print("🚀 Starting FastAPI server on http://127.0.0.1:8002")
+    print("📖 API docs: http://127.0.0.1:8002/docs")
+    
     # Run the server with our configuration
     uvicorn.run(
-        "main_fastapi:app",
+        app,  # Pass app object directly instead of string to avoid reload issues
         host=FASTAPI_HOST,
         port=FASTAPI_PORT,
-        reload=os.getenv("FASTAPI_RELOAD", "true").lower() == "true"
+        log_level="info"
     )
