@@ -76,13 +76,25 @@ async def query_agent(
         # Try to extract Cypher query from the raw agent response
         cypher_query = ""
         try:
+            print(f"\n=== CYPHER EXTRACTION DEBUG ===")
+            print(f"Model: {model}")
+            print(f"Raw response type: {type(raw_response)}")
+            print(f"Has 'get' method: {hasattr(raw_response, 'get')}")
+            
             # Strategy 1: Check if raw_response has messages attribute (LangGraph response)
             if hasattr(raw_response, 'get'):
                 messages = raw_response.get('messages', [])
+                print(f"Found {len(messages)} messages in raw_response")
+                
                 # Look through messages for AIMessage with tool_calls
-                for msg in messages:
+                for idx, msg in enumerate(messages):
+                    print(f"  Message {idx}: type={type(msg)}, has_tool_calls={hasattr(msg, 'tool_calls')}")
                     if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                        for tool_call in msg.tool_calls:
+                        print(f"    Tool calls count: {len(msg.tool_calls)}")
+                        for tc_idx, tool_call in enumerate(msg.tool_calls):
+                            tool_name = tool_call.get('name') if isinstance(tool_call, dict) else getattr(tool_call, 'name', None)
+                            print(f"      Tool call {tc_idx}: type={type(tool_call)}, name={tool_name}")
+                            
                             # Handle dict format
                             if isinstance(tool_call, dict):
                                 if tool_call.get('name') == 'read_neo4j_cypher':
@@ -104,21 +116,30 @@ async def query_agent(
             
             # Strategy 2: Search in string representation if not found
             if not cypher_query and raw_response:
+                print(f"\n  Trying regex extraction from string representation...")
                 import re
                 raw_str = str(raw_response)
+                print(f"  String length: {len(raw_str)} chars")
+                print(f"  First 500 chars: {raw_str[:500]}")
+                
                 # Look for read_neo4j_cypher with query parameter
                 patterns = [
                     r"'name':\s*'read_neo4j_cypher'.*?'query':\s*'((?:[^'\\]|\\.)*)'\s*[,}]",
                     r'"name":\s*"read_neo4j_cypher".*?"query":\s*"((?:[^"\\]|\\.)*)"',
                 ]
-                for pattern in patterns:
+                for pattern_idx, pattern in enumerate(patterns):
                     match = re.search(pattern, raw_str, re.DOTALL)
                     if match:
                         cypher_query = match.group(1)
                         # Unescape
                         cypher_query = cypher_query.replace('\\n', '\n').replace("\\'", "'").replace('\\"', '"')
-                        print(f"✓ Extracted Cypher via regex: {len(cypher_query)} chars")
+                        print(f"✓ Extracted Cypher via regex pattern {pattern_idx+1}: {len(cypher_query)} chars")
                         break
+            
+            print(f"=== Final extraction result: {'SUCCESS' if cypher_query else 'FAILED'} ===")
+            if cypher_query:
+                print(f"Query preview (first 200 chars): {cypher_query[:200]}")
+            print(f"==============================\n")
                         
         except Exception as extract_error:
             print(f"Error extracting Cypher query: {extract_error}")
