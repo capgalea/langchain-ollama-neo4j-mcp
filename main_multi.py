@@ -241,19 +241,71 @@ class MultiToolAgent:
         
         full_request = request
         if should_include_schema:
-            # Add strong instruction for case-insensitive matching
-            cypher_instruction = "\n\nCRITICAL INSTRUCTION: When creating Cypher queries, you MUST use toLower() for ALL text comparisons to ensure case-insensitive matching.\nExample: WHERE toLower(property) CONTAINS toLower('search term')\nThis applies to CONTAINS, =, STARTS WITH, ENDS WITH, etc.\n"
-            cypher_instruction += "\nIMPORTANT: The type() function only works on relationships, NOT nodes. To get a relationship type, assign it to a variable in MATCH.\n"
-            cypher_instruction += "Example: MATCH (a)-[rel:REL_TYPE]->(b) RETURN type(rel)  -- CORRECT\n"
-            cypher_instruction += "Example: MATCH (a:Node) RETURN type(a)  -- WRONG (a is a node, not a relationship)\n"
-            cypher_instruction += "\nIMPORTANT: When matching multiple relationship types with OR (using | in the MATCH pattern), you will get duplicate results.\n"
-            cypher_instruction += "To avoid duplicates when using MATCH (r)-[:TYPE1|TYPE2]->(g), use DISTINCT or group by the target entity.\n"
-            cypher_instruction += "Example with DISTINCT: MATCH (r:Researcher)-[:CHIEF_INVESTIGATOR_ON|COLLABORATOR_ON]->(g:Grant) RETURN DISTINCT g.Grant_Title, g.Application_ID, g.Total_Amount\n"
-            cypher_instruction += "Example with single relationship: MATCH (r:Researcher)-[:CHIEF_INVESTIGATOR_ON]->(g:Grant) -- Only shows grants where they are chief investigator\n"
-            cypher_instruction += "\nPREFERRED TABLE FORMAT: Return one row per entity (e.g., one row per grant) with simple scalar values.\n"
-            cypher_instruction += "AVOID using collect() to aggregate data into lists - this makes tables hard to read.\n"
-            cypher_instruction += "GOOD: MATCH (r:Researcher)-[rel:CHIEF_INVESTIGATOR_ON|COLLABORATOR_ON]->(g:Grant) WHERE toLower(r.CI_Name) CONTAINS toLower('name') RETURN DISTINCT r.CI_Name, g.Application_ID, g.Grant_Title, g.Total_Amount, type(rel) as Relationship_Type\n"
-            cypher_instruction += "BAD: MATCH (r:Researcher)-[:CHIEF_INVESTIGATOR_ON]->(g:Grant) RETURN r.CI_Name, collect({title: g.Grant_Title, amount: g.Total_Amount}) as grants  -- Avoid collect()\n"
+            # Add strong instruction for case-insensitive matching and table formatting
+            cypher_instruction = "\n\n" + "="*80 + "\n"
+            cypher_instruction += "CRITICAL CYPHER QUERY INSTRUCTIONS (APPLY TO ALL QUERIES):\n"
+            cypher_instruction += "="*80 + "\n\n"
+            
+            cypher_instruction += "0. QUERY COMPLETENESS (ABSOLUTE PRIORITY - READ CAREFULLY):\n"
+            cypher_instruction += "   ⚠️ CRITICAL: You MUST answer the COMPLETE question - do NOT return partial data\n"
+            cypher_instruction += "   ⚠️ If asked for 'grant details', you MUST return grant properties, NOT just researcher info\n"
+            cypher_instruction += "   ⚠️ If asked for 'grants for researcher X', you MUST:\n"
+            cypher_instruction += "      1. MATCH the researcher node\n"
+            cypher_instruction += "      2. MATCH their relationship to grants: (r)-[rel:CHIEF_INVESTIGATOR_ON|COLLABORATOR_ON]->(g:Grant)\n"
+            cypher_instruction += "      3. RETURN grant details: g.Application_ID, g.Grant_Title, g.Total_Amount, etc.\n"
+            cypher_instruction += "   \n"
+            cypher_instruction += "   WRONG EXAMPLES (THESE ARE INCOMPLETE):\n"
+            cypher_instruction += "   × MATCH (r:Researcher) WHERE ... RETURN r.CI_Name  -- Missing grants!\n"
+            cypher_instruction += "   × MATCH (r:Researcher) RETURN r  -- Not returning grant details!\n"
+            cypher_instruction += "   \n"
+            cypher_instruction += "   CORRECT EXAMPLE:\n"
+            cypher_instruction += "   ✓ MATCH (r:Researcher)-[rel:CHIEF_INVESTIGATOR_ON|COLLABORATOR_ON]->(g:Grant)\n"
+            cypher_instruction += "     WHERE toLower(r.CI_Name) CONTAINS toLower('name')\n"
+            cypher_instruction += "     RETURN DISTINCT r.CI_Name, type(rel) as Role, g.Application_ID, g.Grant_Title, g.Total_Amount\n\n"
+            
+            cypher_instruction += "1. CASE-INSENSITIVE MATCHING:\n"
+            cypher_instruction += "   - ALWAYS use toLower() for ALL text comparisons\n"
+            cypher_instruction += "   - Example: WHERE toLower(property) CONTAINS toLower('search term')\n"
+            cypher_instruction += "   - Applies to: CONTAINS, =, STARTS WITH, ENDS WITH, etc.\n\n"
+            
+            cypher_instruction += "2. RELATIONSHIP TYPE FUNCTION:\n"
+            cypher_instruction += "   - type() ONLY works on relationships, NOT nodes\n"
+            cypher_instruction += "   - CORRECT: MATCH (a)-[rel:REL_TYPE]->(b) RETURN type(rel)\n"
+            cypher_instruction += "   - WRONG: MATCH (a:Node) RETURN type(a)\n\n"
+            
+            cypher_instruction += "3. AVOID DUPLICATE RESULTS:\n"
+            cypher_instruction += "   - When matching multiple relationship types [:TYPE1|TYPE2], ALWAYS use DISTINCT\n"
+            cypher_instruction += "   - REQUIRED: MATCH (r)-[:TYPE1|TYPE2]->(g) RETURN DISTINCT ...\n"
+            cypher_instruction += "   - Or use single relationship type if duplicates not wanted\n\n"
+            
+            cypher_instruction += "4. TABLE FORMAT (CRITICAL - ABSOLUTE REQUIREMENT):\n"
+            cypher_instruction += "   - FORBIDDEN: NEVER EVER use COLLECT() in RETURN clause\n"
+            cypher_instruction += "   - FORBIDDEN: NEVER create nested objects or maps in RETURN\n"
+            cypher_instruction += "   - REQUIRED: Return ONE ROW per grant/entity with ONLY scalar values\n"
+            cypher_instruction += "   - REQUIRED: Use simple properties directly: g.Grant_Title, g.Total_Amount, etc.\n"
+            cypher_instruction += "   - If showing both CI and Collaborator grants, use separate MATCH or UNION\n"
+            cypher_instruction += "   - CORRECT EXAMPLE:\n"
+            cypher_instruction += "     MATCH (r:Researcher)-[rel:CHIEF_INVESTIGATOR_ON|COLLABORATOR_ON]->(g:Grant)\n"
+            cypher_instruction += "     WHERE toLower(r.CI_Name) CONTAINS toLower('name')\n"
+            cypher_instruction += "     RETURN DISTINCT r.CI_Name, type(rel) as Role, g.Application_ID, g.Grant_Title, g.Total_Amount\n"
+            cypher_instruction += "   - WRONG EXAMPLES (DO NOT DO THIS):\n"
+            cypher_instruction += "     × COLLECT({title: g.Grant_Title}) -- Creates nested structure\n"
+            cypher_instruction += "     × COLLECT(DISTINCT g.Grant_Title) -- Creates list\n"
+            cypher_instruction += "     × {role: 'CI', title: g.Grant_Title} -- Creates map object\n\n"
+            
+            cypher_instruction += "5. PROPERTY EXISTENCE (CRITICAL - SYNTAX CHANGE):\n"
+            cypher_instruction += "   - NEVER use exists() function - it's deprecated and causes errors\n"
+            cypher_instruction += "   - ALWAYS use 'IS NOT NULL' or 'IS NULL' instead\n"
+            cypher_instruction += "   - CORRECT: WHERE r.CI_Name IS NOT NULL\n"
+            cypher_instruction += "   - WRONG: WHERE exists(r.CI_Name) -- THIS WILL FAIL\n"
+            cypher_instruction += "   - Note: In most cases, checking existence is unnecessary - just use the property directly\n\n"
+            
+            cypher_instruction += "6. SINGLE STATEMENT ONLY:\n"
+            cypher_instruction += "   - Return ONLY ONE Cypher statement - no semicolons, no multiple queries\n"
+            cypher_instruction += "   - CORRECT: MATCH (r:Researcher) RETURN r.CI_Name\n"
+            cypher_instruction += "   - WRONG: MATCH (r:Researcher); RETURN r.CI_Name; -- Multiple statements not allowed\n\n"
+            
+            cypher_instruction += "="*80 + "\n\n"
             
             if hasattr(self, 'schema_context') and self.schema_context:
                 full_request = self.schema_context + cypher_instruction + "\n\nUSER REQUEST: " + request
