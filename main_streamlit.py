@@ -235,7 +235,7 @@ def extract_cypher_query(response_text):
     
     return None
 
-def get_query_results_as_dataframe(cypher_query, limit=100):
+def get_query_results_as_dataframe(cypher_query, limit=100, parameters=None):
     """
     Execute a Cypher query and return results as a pandas DataFrame.
     Returns None if query fails or returns no tabular data.
@@ -255,12 +255,44 @@ def get_query_results_as_dataframe(cypher_query, limit=100):
         # Type assertion to satisfy type checker - we've already validated these are not None
         driver = GraphDatabase.driver(str(neo4j_uri), auth=(str(neo4j_user), str(neo4j_password)))
         with driver.session() as session:
+            # Clean up the query
+            query = cypher_query.strip()
+            
+            # Fix: If multiple statements are present, take only the first one
+            # Split by semicolon and take first statement
+            if ';' in query:
+                statements = [s.strip() for s in query.split(';') if s.strip()]
+                if len(statements) > 1:
+                    st.warning(f"⚠️ Multiple Cypher statements detected. Using only the first one.")
+                    query = statements[0]
+            
+            # Fix: Replace deprecated exists() syntax with IS NOT NULL
+            import re
+            exists_pattern = r'exists\s*\(\s*([a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*)\s*\)'
+            if re.search(exists_pattern, query, re.IGNORECASE):
+                st.warning("⚠️ Auto-fixing: Replacing deprecated exists() syntax with IS NOT NULL")
+                query = re.sub(exists_pattern, r'\1 IS NOT NULL', query, flags=re.IGNORECASE)
+                st.info(f"🔧 Fixed deprecated syntax")
+            
+            query_upper = query.upper()
+            
+            # Check if query has multiple relationship types (indicated by | in MATCH pattern)
+            has_multiple_rel_types = '|' in query and 'MATCH' in query_upper
+            has_distinct = 'DISTINCT' in query_upper
+            
+            if has_multiple_rel_types and not has_distinct:
+                st.warning("⚠️ Query may return duplicates: Multiple relationship types detected but no DISTINCT in RETURN clause")
+                st.info("💡 Tip: The query should use 'RETURN DISTINCT' to avoid duplicate results")
+            
             # Add LIMIT if not already present
-            query = cypher_query
-            if 'LIMIT' not in query.upper():
+            if 'LIMIT' not in query_upper:
                 query = f"{query} LIMIT {limit}"
             
-            result = session.run(query)
+            # Execute with parameters if provided
+            if parameters and isinstance(parameters, dict):
+                result = session.run(query, parameters)
+            else:
+                result = session.run(query)
             records = list(result)
             
             if not records:
@@ -340,6 +372,33 @@ def get_query_results_as_dataframe(cypher_query, limit=100):
                 data.append(row)
             
             df = pd.DataFrame(data)
+            
+            # Post-processing: Remove duplicate rows based on key columns
+            # Check if we have common grant identifier columns (case-insensitive)
+            dedup_columns = []
+            df_columns_lower = {col.lower(): col for col in df.columns}
+            
+            # Try to find application ID column (various naming conventions)
+            for id_name in ['application_id', 'applicationid', 'grant_id', 'grantid', 'id']:
+                if id_name in df_columns_lower:
+                    dedup_columns.append(df_columns_lower[id_name])
+                    break
+            
+            # If no ID column, try grant title
+            if not dedup_columns:
+                for title_name in ['grant_title', 'granttitle', 'title']:
+                    if title_name in df_columns_lower:
+                        dedup_columns.append(df_columns_lower[title_name])
+                        break
+            
+            if dedup_columns:
+                original_count = len(df)
+                # Keep first occurrence, which typically has the primary relationship
+                df = df.drop_duplicates(subset=dedup_columns, keep='first')
+                removed_count = original_count - len(df)
+                if removed_count > 0:
+                    st.info(f"🔧 Removed {removed_count} duplicate grant(s) based on {', '.join(dedup_columns)}")
+            
             driver.close()
             return df
             
@@ -584,7 +643,11 @@ def main():
                 try:
                     with st.spinner("Loading query results..."):
                         st.info(f"🔍 Calling get_query_results_as_dataframe...")
-                        df = get_query_results_as_dataframe(st.session_state.last_cypher_query, limit=1000)
+                        df = get_query_results_as_dataframe(
+                            st.session_state.last_cypher_query,
+                            limit=1000,
+                            parameters=st.session_state.get('last_cypher_params')
+                        )
                         st.info(f"🔍 Result: df is {type(df)}, None={df is None}, Empty={df.empty if df is not None else 'N/A'}")
                         
                         if df is not None and not df.empty:
@@ -754,6 +817,9 @@ def main():
                     # Store for visualization
                     if cypher_query:
                         st.session_state.last_cypher_query = cypher_query
+                        # Store any extracted parameters for parameterized queries
+                        cypher_params = result.get("cypher_params") if isinstance(result, dict) else None
+                        st.session_state.last_cypher_params = cypher_params
                         st.session_state.visualize_results = True
                         st.info(f"💾 Stored in session state (length: {len(cypher_query)} chars)")
                         
@@ -764,7 +830,8 @@ def main():
                             "query": user_input,
                             "response": agent_response,
                             "execution_time": execution_time,
-                            "cypher_query": cypher_query
+                            "cypher_query": cypher_query,
+                            "cypher_params": st.session_state.get("last_cypher_params")
                         }
                         st.session_state.query_history.append(query_entry)
                         st.info(f"📝 Stored query in history (total: {len(st.session_state.query_history)} queries)")
